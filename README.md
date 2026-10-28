@@ -1,1 +1,1 @@
-# LabMain
+# gromacs-md
