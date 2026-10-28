@@ -1,0 +1,307 @@
+# Chapter 3: Creating the Simulation Box, Adding Water, and Introducing Ions
+
+
+A protein–protein complex cannot be simulated realistically in isolation when the goal is to understand its behavior in aqueous solution. We need to define a periodic simulation cell, surround the complex with explicit water molecules, and add appropriate ions.
+
+This chapter continues from [Chapter 2: Topology Generation](02_topology_generation.md). We assume that `pdb2gmx` has already generated `complex_processed.gro` and `complex.top`, and that their chain composition, termini, and force-field parameters have been checked.
+
+**Example settings:** GROMACS 2026.x, AMBER99SB-ILDN, TIP3P water, 1.2 nm box padding, and approximately 0.15 M NaCl. These are illustrative, not mandatory for every molecular system.
+
+## 1. Learning objectives
+
+By the end of this chapter, you should be able to:
+
+- Explain periodic boundary conditions (PBC) and the simulation box.
+- Construct a rhombic dodecahedral box with `gmx editconf`.
+- Add explicit water with `gmx solvate`.
+- Prepare a minimal GROMACS run-input file with `gmx grompp`.
+- Neutralize the system and introduce salt with `gmx genion`.
+- Check that the coordinate file and topology contain consistent molecule counts.
+
+## 2. Starting files
+
+Your working directory should contain the files produced in Chapter 2:
+
+```text
+complex_processed.gro
+complex.top
+```
+
+There may also be one or more protein `.itp` files and position-restraint files. **Keep these beside the topology:** `complex.top` may include them using relative paths.
+
+Check your working directory and input files:
+
+```bash
+pwd
+ls -lh complex_processed.gro complex.top
+```
+
+To avoid losing the original topology when GROMACS updates molecule counts, create a backup:
+
+```bash
+cp complex.top complex_before_solvation.top
+```
+
+## 3. Periodic boundary conditions
+
+In an atomistic MD simulation, a finite simulation box is repeated in three dimensions. When molecules cross one side of the box, their periodic images enter from the opposite side. This helps approximate bulk solution without requiring an enormous number of water molecules.
+
+**Important:** A box must be large enough to prevent an interacting protein complex from making artificial contacts with its own periodic images. The appropriate spacing depends on the complex's shape, fluctuations, and the interaction cutoffs. A 1.2 nm padding value is a common starting choice, not a guarantee against such contacts throughout the simulation.
+
+### 3.1 Build a rhombic dodecahedral box
+
+```bash
+gmx editconf \
+  -f complex_processed.gro \
+  -o complex_box.gro \
+  -c \
+  -d 1.2 \
+  -bt dodecahedron
+```
+
+| Option | Purpose |
+|---|---|
+| `-f` | Input coordinate file |
+| `-o` | Output coordinate file with box vectors |
+| `-c` | Center the structure in the cell |
+| `-d 1.2` | Specify a 1.2 nm solute-to-box-edge distance |
+| `-bt dodecahedron` | Use a rhombic dodecahedral periodic cell |
+
+For globular systems, a rhombic dodecahedron is often more economical than a cube with the same minimum periodic image distance.
+
+Check that the output exists and inspect its box vectors:
+
+```bash
+ls -lh complex_box.gro
+tail -n 1 complex_box.gro
+```
+
+The last line of a `.gro` file contains the periodic box vectors. A dodecahedral box can have **nine values**, not simply three lengths. This is expected.
+
+> **Validation:** Confirm that the entire intended complex is in the box and that the chosen padding is suitable for the planned dynamics. In particular, inspect unusually extended or flexible regions.
+
+## 4. Add explicit water molecules
+
+```bash
+gmx solvate \
+  -cp complex_box.gro \
+  -cs spc216.gro \
+  -o complex_solv.gro \
+  -p complex.top
+```
+
+| Option | Purpose |
+|---|---|
+| `-cp` | Coordinate file containing the solute and box |
+| `-cs` | Pre-equilibrated water-coordinate template |
+| `-o` | Output solvated system |
+| `-p` | Update the system topology with the added waters |
+
+### Why is the solvent file called `spc216.gro` if we use TIP3P?
+
+`spc216.gro` supplies **initial water coordinates**. The actual water interactions are determined by the TIP3P parameters selected in the topology during `pdb2gmx`. The coordinate template is not itself a force field.
+
+### 4.1 Validate solvation
+
+```bash
+ls -lh complex_solv.gro
+head -n 2 complex_solv.gro
+tail -n 20 complex.top
+```
+
+The second line of a `.gro` file reports the total number of atoms. The `[ molecules ]` section of `complex.top` reports how many molecules of each type are present.
+
+If the input protein structure already included crystallographic waters, they may appear as separate `SOL` entries. Multiple `SOL` lines are not automatically an error. What matters is that **the summed molecule counts match the coordinate file and the topology's atom definitions**.
+
+### Common mistake
+
+Do not run `gmx solvate` repeatedly using the **same modified topology** unless you intend to update the system again. It changes the `[ molecules ]` section. Keep versioned backups or rebuild cleanly from the last verified stage.
+
+## 5. Why add ions?
+
+Protein systems may have a net electrical charge due to ionizable residues and terminal groups. Simulations commonly add counterions to neutralize the system and additional ions to approximate experimental ionic strength.
+
+In this example, we aim for approximately **0.15 M NaCl** and a net-neutral simulation box. The exact final ion counts depend on the initial protein charge and solvent volume.
+
+`gmx genion` needs a compiled `.tpr` file that describes the already-solvated system. We therefore create a small `.mdp` file and process it with `gmx grompp`.
+
+## 6. Create `ions.mdp`
+
+Create a plain-text file named `ions.mdp` containing:
+
+```ini
+; Run-input settings for ion insertion; no MD is performed here
+integrator       = steep
+nsteps           = 500
+emtol            = 1000.0
+emstep           = 0.01
+
+cutoff-scheme    = Verlet
+nstlist          = 20
+coulombtype      = PME
+rcoulomb         = 1.2
+vdwtype          = Cut-off
+rvdw             = 1.2
+
+pbc              = xyz
+constraints      = none
+```
+
+These settings allow `grompp` to assemble the run input; **this step does not execute minimization or equilibration**.
+
+You can create the file using a text editor:
+
+```bash
+nano ions.mdp
+```
+
+Save it, then confirm that its name and contents are correct:
+
+```bash
+ls -lh ions.mdp
+cat ions.mdp
+```
+
+## 7. Build the ion-insertion run input
+
+```bash
+gmx grompp \
+  -f ions.mdp \
+  -c complex_solv.gro \
+  -p complex.top \
+  -o ions.tpr
+```
+
+Here, `grompp` combines the coordinate file, topology, and `.mdp` settings into `ions.tpr`.
+
+**Do not ignore fatal errors or use `-maxwarn` to bypass problems you have not understood.** If `ions.tpr` is missing, check the complete `grompp` output and resolve the problem before continuing.
+
+Verify:
+
+```bash
+ls -lh ions.tpr
+```
+
+## 8. Insert ions with `gmx genion`
+
+Before running a command that modifies `complex.top`, preserve the current version:
+
+```bash
+cp complex.top complex_before_ions.top
+```
+
+Then run:
+
+```bash
+gmx genion \
+  -s ions.tpr \
+  -o complex_ions.gro \
+  -p complex.top \
+  -pname NA \
+  -nname CL \
+  -neutral \
+  -conc 0.15
+```
+
+| Option | Purpose |
+|---|---|
+| `-s ions.tpr` | Input run file describing the solvated system |
+| `-o complex_ions.gro` | Output coordinates after ion replacement |
+| `-p complex.top` | Update solvent and ion molecule counts in the topology |
+| `-pname NA` | Sodium-ion molecule name in the chosen force field |
+| `-nname CL` | Chloride-ion molecule name in the chosen force field |
+| `-neutral` | Add counterions to compensate the system's net charge |
+| `-conc 0.15` | Request approximately 0.15 mol/L salt concentration |
+
+### 8.1 Select the correct solvent group
+
+GROMACS will display a selection menu. Choose the group corresponding to water molecules, commonly called **`SOL`**.
+
+**Do not select `System` or either `Protein` group.** `genion` replaces whole solvent molecules with single ions.
+
+The menu **numbers may differ between systems**. Read the group names rather than copying a number from another tutorial.
+
+### 8.2 What actually happens?
+
+`genion` does **not** add new atoms on top of the existing solvent without changing the water count. It randomly replaces eligible water molecules with monoatomic ions and, with `-p`, updates the topology accordingly.
+
+If the complex initially has a nonzero net charge, the sodium and chloride counts may not be equal. That can be correct: neutralization requires an excess of counterions.
+
+## 9. Validate the solvated, neutralized system
+
+Check the generated files:
+
+```bash
+ls -lh complex_ions.gro complex.top
+```
+
+Inspect the molecule list:
+
+```bash
+tail -n 25 complex.top
+```
+
+Look for the expected protein molecule types, `SOL`, `NA`, and `CL`.
+
+Check the total number of coordinate atoms:
+
+```bash
+head -n 2 complex_ions.gro
+```
+
+The number on the second line is the total coordinate atom count. It is **not** the number of molecules.
+
+For a quick, stronger consistency check, prepare the next run input during Chapter 4 and ensure that `grompp` processes the final coordinate file and topology without atom-count mismatches. This also helps identify missing topology includes or invalid molecule ordering.
+
+### Validation checklist
+
+- [ ] The complex is inside a suitable periodic box.
+- [ ] Solvation completed successfully.
+- [ ] Water counts in the coordinate file and topology are consistent.
+- [ ] The `SOL` selection was used for ion replacement.
+- [ ] The ion names match the selected force field.
+- [ ] Net charge is zero after ion insertion.
+- [ ] The requested salt concentration and actual ion counts have been recorded.
+- [ ] Original topology versions have been backed up.
+
+## 10. Common problems and solutions
+
+| Problem | What to check |
+|---|---|
+| `ions.tpr` was not created | Read the **complete** `grompp` output; verify `.mdp`, coordinates, topology, and includes. |
+| `Atom count in topology and coordinate file does not match` | Check molecule counts in `[ molecules ]`; do not reuse a topology already changed by another solvation/ionization run. |
+| No `SOL` group is available | Confirm that water molecules were added and correctly represented in the topology. |
+| `genion` cannot replace water | Confirm that the chosen group contains valid solvent molecules and enough eligible waters. |
+| Sodium and chloride counts are unequal | The solute may have an initial net charge; verify charge neutrality rather than expecting equal counts. |
+| Unexpected water or ion counts | Check original crystallographic waters, initial box dimensions, and whether the topology was modified previously. |
+| The dodecahedron looks distorted in a viewer | A periodic cell may be stored in a triclinic representation; visualization alone does not indicate incorrect physics. |
+
+## 11. Final file inventory
+
+After completing this chapter, the essential outputs are:
+
+```text
+complex_processed.gro       # Input protein complex
+complex_box.gro             # Complex inside a periodic box
+complex_solv.gro            # Solvated complex
+complex_ions.gro            # Solvated complex with ions
+complex.top                 # Updated system topology
+ions.mdp                    # Settings used to construct ions.tpr
+ions.tpr                    # Temporary run input for genion
+```
+
+Keep all referenced protein `.itp` files in the correct relative locations.
+
+## 12. Next chapter
+
+**Chapter 4: Energy Minimization and Position Restraints**
+
+We will learn why local atomic overlaps can cause large forces, create an energy-minimization `.mdp` file, decide when restraints are appropriate, and interpret the GROMACS convergence report.
+
+## References
+
+1. Lemkul, J. A. (2024). *Introductory Tutorials for Simulating Protein Dynamics with GROMACS.* **Journal of Physical Chemistry B**, 128, 9418–9435. https://doi.org/10.1021/acs.jpcb.4c04901
+2. GROMACS Documentation, `gmx editconf`: https://manual.gromacs.org/current/onlinehelp/gmx-editconf.html
+3. GROMACS Documentation, `gmx solvate`: https://manual.gromacs.org/current/onlinehelp/gmx-solvate.html
+4. GROMACS Documentation, `gmx genion`: https://manual.gromacs.org/current/onlinehelp/gmx-genion.html
+5. GROMACS Documentation, `gmx grompp`: https://manual.gromacs.org/current/onlinehelp/gmx-grompp.html
