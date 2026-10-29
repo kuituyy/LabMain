@@ -1,0 +1,242 @@
+# Chapter 4: Energy Minimization and Position Restraints
+
+## 1. Why energy minimization is necessary
+
+After solvation and ion addition, a protein–protein simulation box can contain unfavorable contacts between proteins, water molecules, or ions. **Energy minimization (EM)** adjusts atomic coordinates to reduce potential energy and large forces before molecular dynamics.
+
+EM is **not** molecular dynamics: there is no physical trajectory or elapsed simulation time. A successful minimization also **does not prove** that the starting protein–protein docking pose is biologically correct.
+
+### Learning objectives
+
+- Recognize steric clashes and understand their limitations.
+- Prepare an `em.mdp` file.
+- Run `gmx grompp` and `gmx mdrun`.
+- Interpret potential energy and maximum force (`Fmax`).
+- Understand conventional and selective position restraints.
+- Verify the resulting structure before NVT equilibration.
+
+## 2. Input files
+
+Continue from Chapter 3. The working directory should contain:
+
+```text
+complex_ions.gro
+complex.top
+protein_chain_*.itp   # actual names depend on pdb2gmx
+posre*.itp            # if generated
+```
+
+`complex.top` must include the relevant force-field and molecule-specific `.itp` files. Do not change the topology after preparing `complex_ions.gro` unless you understand the consequences.
+
+Check your files:
+
+```bash
+pwd
+ls -lh complex_ions.gro complex.top
+ls -lh *.itp
+```
+
+## 3. Define an energy-minimization parameter file
+
+Create `em.mdp`:
+
+```ini
+; Energy minimization — illustrative AMBER99SB-ILDN/TIP3P setup
+integrator             = steep
+emtol                  = 1000.0
+emstep                 = 0.001
+nsteps                 = 50000
+
+cutoff-scheme           = Verlet
+coulombtype            = PME
+rcoulomb               = 1.2
+vdwtype                = Cut-off
+rvdw                   = 1.2
+pbc                    = xyz
+constraints            = none
+comm-mode              = None
+```
+
+**What these settings mean**
+
+| Parameter | Meaning |
+|---|---|
+| `integrator = steep` | Use steepest-descent minimization. |
+| `emtol = 1000.0` | Stop if the maximum force falls below 1000 kJ mol⁻¹ nm⁻¹. This is an illustrative initial threshold, not a universal accuracy criterion. |
+| `emstep = 0.001` | Initial maximum displacement in nm for the minimizer. |
+| `nsteps = 50000` | Maximum minimization steps. |
+| `coulombtype = PME` | Account for long-range electrostatics with particle-mesh Ewald. |
+| `constraints = none` | Do not constrain bonds during this minimization. |
+
+**Force-field compatibility:** These are illustrative settings for the workflow used in this tutorial. Nonbonded parameters, water models, and corrections must be checked against the chosen force field; do not blindly copy settings from a CHARMM tutorial into an AMBER simulation.
+
+## 4. Generate the binary run input
+
+```bash
+gmx grompp -f em.mdp -c complex_ions.gro -p complex.top -o em.tpr
+```
+
+Here, `grompp` combines coordinates, topology, and settings into `em.tpr`.
+
+Check that processing succeeded:
+
+```bash
+ls -lh em.tpr
+```
+
+Read all errors and warnings. Do **not** routinely bypass warnings using `-maxwarn`.
+
+## 5. Run energy minimization
+
+```bash
+gmx mdrun -deffnm em
+```
+
+Common outputs:
+
+| File | Purpose |
+|---|---|
+| `em.gro` | Final minimized coordinates. |
+| `em.log` | Minimization log and stopping reason. |
+| `em.edr` | Energies and related quantities. |
+| `em.trr` | Full-precision coordinate/force information if written. |
+
+Inspect the ending of the log:
+
+```bash
+tail -n 35 em.log
+```
+
+Look for the minimization stopping reason, **Potential Energy**, and **Maximum force (`Fmax`)**.
+
+### Interpreting convergence
+
+A message indicating that the steepest-descent minimizer converged with `Fmax < emtol` supports that the requested criterion was met. If minimization instead reached the maximum number of steps or machine precision, review the forces and system geometry. The magnitude of total potential energy depends strongly on system composition and size; **a very negative energy is not, by itself, proof of a good structure**.
+
+## 6. Plot or extract potential energy
+
+```bash
+gmx energy -f em.edr -o potential_em.xvg
+```
+
+When prompted, choose **Potential** and finish selection with `0` if required by your version. The `potential_em.xvg` output is a text data file; it is **not** a command to execute.
+
+To inspect its first numerical rows:
+
+```bash
+grep -v '^[#@]' potential_em.xvg | head
+```
+
+A descending potential energy curve is typical, but you should also examine the final force and structure.
+
+## 7. What are position restraints?
+
+A position restraint adds a harmonic potential that penalizes displacement of selected atoms from reference coordinates. It is useful during preparation and equilibration, especially for preventing abrupt rearrangements of protein heavy atoms while water and ions relax.
+
+Restraints and bond **constraints** are different concepts.
+
+A typical `pdb2gmx` topology conditionally includes restraints like this:
+
+```cpp
+#ifdef POSRES
+#include "posre_Protein_chain_A.itp"
+#endif
+```
+
+The **actual generated filename may differ**. Check your own `.itp` files; do not paste the example blindly.
+
+To enable the `POSRES` block, place the following in `em.mdp` or an equilibration `.mdp`:
+
+```ini
+define = -DPOSRES
+```
+
+Then pass restraint reference coordinates using `-r`:
+
+```bash
+gmx grompp -f em.mdp -c complex_ions.gro -r complex_ions.gro -p complex.top -o em.tpr
+```
+
+Without the matching `define` macro, the conditional restraint block is inactive. With restraints enabled, `-r` specifies their reference positions.
+
+**Do not run unrestrained and restrained minimizations into the same `em.*` filenames without saving the previous results.** Prefer names such as `em_unrestrained` and `em_restrained` for separate experiments.
+
+### Position restraints during NPT
+
+Position restraints are generally applied while solvent equilibrates. When changing box dimensions under NPT, `refcoord-scaling = all` allows restraint reference positions to scale with the box, giving well-defined pressure/virial behavior for this restraint treatment. This option belongs in the NPT `.mdp`, **not** in a generic energy-minimization example.
+
+## 8. Advanced option: selective local position restraints
+
+For some research questions, a subset of a protein may need to remain flexible while other regions are restrained. This is an **advanced, hypothesis-dependent** protocol, not a default recommendation for all protein–protein simulations.
+
+A local restraint file can look like:
+
+```ini
+[ position_restraints ]
+; ai  funct  fcx   fcy   fcz
+  1     1    1000  1000  1000
+  5     1    1000  1000  1000
+```
+
+**The atom numbers above are examples only.** They must refer to atom indices **within the corresponding `[ moleculetype ]` definition**, not global atom serial numbers from a combined PDB file.
+
+Include a verified local restraint file within the appropriate molecule's topology:
+
+```cpp
+#ifdef POSRES_LOCAL
+#include "posre_local_chain_A.itp"
+#endif
+```
+
+And activate it in the `.mdp`:
+
+```ini
+define = -DPOSRES_LOCAL
+```
+
+The same `-r` reference-coordinate requirement applies. Verify that restraints are attached to the **intended molecule and atoms**, particularly if multiple chains were processed into distinct molecule types or if `pdb2gmx` reordered molecules.
+
+**Important:** Restraining most of a protein while leaving selected loops flexible may bias which motions can occur. Remove such restraints for unbiased production MD, unless a justified enhanced-sampling or restrained-modeling protocol explicitly requires them.
+
+## 9. Inspect minimized geometry
+
+Visualize `complex_ions.gro` and `em.gro` in a molecular viewer. Inspect:
+
+- Protein–protein interface contacts and any remaining very short nonbonded distances.
+- Backbone and side-chain geometry.
+- Unexpected separation, distortion, or rearrangement of the two proteins.
+- Whether the modeled binding pose remains chemically plausible.
+
+For quantitative comparison, a backbone RMSD may be helpful:
+
+```bash
+gmx rms -s em.tpr -f em.gro -o rmsd_after_em.xvg
+```
+
+Choose a consistent **Backbone** selection for fitting and calculation. For two-protein complexes, a **single overall RMSD can conceal relative movement**: fitting to one protein and measuring the other can be more informative. Analysis groups need to be defined carefully if chain IDs are absent or the processed residue numbering differs from the PDB.
+
+## 10. Troubleshooting
+
+| Symptom | What to investigate |
+|---|---|
+| `em.tpr` does not exist | Read the full `grompp` output; verify paths, topology includes, and `.mdp` syntax. |
+| `atom index out of bounds` in restraints | The restraint file may use global rather than molecule-local atom numbers. |
+| `number of coordinates does not match topology` | Water/ion counts or molecule ordering may be inconsistent between `.gro` and `.top`. |
+| Very large `Fmax` after minimization | Inspect clashes, misplaced atoms/ions, protonation, and topology problems. |
+| Minimizer stops at machine precision | Inspect the actual final force and structure before deciding whether further minimization is needed. |
+| Minimized proteins still overlap severely | Revisit the starting complex; EM cannot reliably repair a fundamentally incorrect docking orientation. |
+| Position restraints seem ineffective | Verify the `#ifdef` macro, the `define` setting, and `-r` reference coordinates. |
+
+
+## 11. Next chapter
+
+**Chapter 5: NVT Equilibration — Stabilizing Temperature**
+
+We will configure a thermostat, apply appropriate restraints, initialize velocities, run a short NVT trajectory, and analyze temperature stability.
+
+## References
+
+1. Lemkul, J. A. (2024). *Introductory Tutorials for Simulating Protein Dynamics with GROMACS.* *Journal of Physical Chemistry B*, **128**, 9418–9435. https://doi.org/10.1021/acs.jpcb.4c04901
+2. GROMACS 2026.4 documentation — [Energy minimization](https://manual.gromacs.org/2026.4/reference-manual/algorithms/energy-minimization.html).
+3. GROMACS 2026.4 documentation — [Restraints](https://manual.gromacs.org/2026.4/reference-manual/functions/restraints.html).
+4. GROMACS 2026.4 documentation — [Topology file formats](https://manual.gromacs.org/2026.4/reference-manual/topologies/topology-file-formats.html).
