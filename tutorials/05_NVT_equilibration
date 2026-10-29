@@ -1,0 +1,205 @@
+# Chapter 5: NVT Equilibration — Stabilizing Temperature
+
+## 1. Overview
+
+Following energy minimization, the system must be equilibrated before an unbiased production molecular dynamics (MD) simulation. A typical workflow begins with **NVT equilibration**, where the **number of particles (N)**, **volume (V)**, and **target temperature (T)** are held constant or controlled as appropriate to the ensemble.
+
+During NVT equilibration, the solvent and ions begin to reorganize around the proteins. **Position restraints** are commonly used to prevent large initial protein displacements while the environment relaxes.
+
+This example uses **GROMACS**, **AMBER99SB-ILDN**, **TIP3P water**, a **300 K** temperature target, and a **100 ps** initial equilibration. These are example settings, not a universally validated protocol.
+
+### Learning objectives
+
+- Understand why NVT equilibration follows energy minimization.
+- Configure a velocity-rescaling thermostat and initialize velocities.
+- Understand position restraints and their reference coordinates.
+- Generate a `.tpr` file and run a 100 ps simulation.
+- Check temperature stability and common GROMACS messages.
+
+## 2. Required input files
+
+From Chapter 4, you should have:
+
+| File | Purpose |
+|---|---|
+| `em.gro` | Final minimized coordinates |
+| `complex.top` | Complete topology |
+| Protein `.itp` files | Protein molecule definitions |
+| Position-restraint `.itp` files | Restraints referenced by the topology |
+
+If your energy-minimization run used the name `em_local` instead of `em`, substitute `em_local.gro` throughout the commands below.
+
+**Note:** Names of the actual protein `.itp` and restraint files depend on `pdb2gmx` output. The `#include` directives in `complex.top` and its included files must resolve to existing paths.
+
+## 3. Create `nvt.mdp`
+
+Create a file named `nvt.mdp` containing:
+
+```ini
+; NVT equilibration: 100 ps at 300 K
+; Enable restraints included under #ifdef POSRES in the topology.
+define                  = -DPOSRES
+
+integrator              = md
+dt                      = 0.002       ; ps (2 fs)
+nsteps                  = 50000       ; 100 ps
+
+; Output every 1 ps
+nstxout-compressed      = 500
+nstenergy               = 500
+nstlog                  = 500
+
+; Neighbor searching and nonbonded interactions
+cutoff-scheme           = Verlet
+nstlist                 = 20
+coulombtype             = PME
+rcoulomb                = 1.2
+vdwtype                 = Cut-off
+rvdw                    = 1.2
+DispCorr                = EnerPres
+
+; Thermostat: velocity rescaling
+tcoupl                  = V-rescale
+tc-grps                 = System
+tau_t                   = 0.1
+ref_t                   = 300
+
+; No pressure coupling in NVT
+pcoupl                  = no
+
+; Constraints and periodic boundaries
+constraints             = h-bonds
+constraint-algorithm    = lincs
+pbc                     = xyz
+
+; First dynamics segment: generate initial velocities
+continuation            = no
+gen_vel                 = yes
+gen_temp                = 300
+gen_seed                = -1
+```
+
+### Key parameters
+
+| Parameter | Explanation |
+|---|---|
+| `dt = 0.002` | 2 fs integration time step (GROMACS uses ps). |
+| `nsteps = 50000` | 50,000 × 0.002 ps = 100 ps. |
+| `tcoupl = V-rescale` | Stochastic velocity-rescaling thermostat. |
+| `tc-grps = System` | Couples the whole simulated system to one thermostat group. |
+| `ref_t = 300` | Target temperature of 300 K. |
+| `tau_t = 0.1` | Thermostat coupling time constant (ps). |
+| `pcoupl = no` | Keeps box dimensions fixed; no barostat. |
+| `define = -DPOSRES` | Activates topology restraints guarded by `#ifdef POSRES`. |
+| `gen_vel = yes` | Draws initial velocities from a Maxwell distribution. |
+| `continuation = no` | Appropriate when starting MD directly from minimized coordinates. |
+
+**Do not use `define = -DPOSRES` unless your topology actually defines the intended restraints.** Some workflows implement custom restraints under a different macro, such as `POSRES_LOCAL`. The macro must match the included topology and your desired equilibration strategy.
+
+Force-field-specific choices, especially nonbonded settings and water models, should be reviewed for compatibility. These example parameters were selected for the tutorial rather than automatically copied from a different force field.
+
+## 4. Prepare the run using `grompp`
+
+```bash
+gmx grompp \
+  -f nvt.mdp \
+  -c em.gro \
+  -r em.gro \
+  -p complex.top \
+  -o nvt.tpr
+```
+
+- `-f`: input MD parameter file.
+- `-c`: starting coordinates.
+- `-r`: restraint-reference coordinates (needed when position restraints are active).
+- `-p`: system topology.
+- `-o`: binary run input.
+
+**Check the output carefully.** `grompp` may print `NOTE`, `WARNING`, or `Fatal error`. A `NOTE` is not automatically a failure. Do not use `-maxwarn` merely to silence an unexplained warning.
+
+Confirm that the run input exists:
+
+```bash
+ls -lh nvt.tpr
+```
+
+## 5. Run the NVT simulation
+
+```bash
+gmx mdrun -deffnm nvt
+```
+
+The command typically produces:
+
+| Output | Purpose |
+|---|---|
+| `nvt.gro` | Coordinates at the end of NVT |
+| `nvt.cpt` | Checkpoint for continuation into NPT |
+| `nvt.edr` | Energy and temperature data |
+| `nvt.log` | Log containing run information |
+| `nvt.xtc` | Compressed coordinates at the configured output interval |
+
+You can inspect the last log lines after the run:
+
+```bash
+tail -n 25 nvt.log
+```
+
+On a Mac, if you need to prevent **idle sleep during a future run**, use `caffeinate -i` when launching GROMACS. Closing a laptop lid can still trigger sleep.
+
+## 6. Analyze temperature using `gmx energy`
+
+```bash
+gmx energy -f nvt.edr -o temperature_nvt.xvg
+```
+
+When the interactive menu appears, choose the entry labeled **Temperature**. Enter the actual number shown in *your* menu, followed by `0` to finish the selection (or complete the interactive selection as prompted).
+
+GROMACS will print a summary resembling:
+
+```text
+Energy        Average    Err.Est.    RMSD    Tot-Drift
+Temperature   ...        ...         ...     ...        (K)
+```
+
+Interpretation:
+
+- **Average:** mean temperature over the selected period.
+- **Err.Est.:** estimate of uncertainty in the mean (dependent on sampling and correlation).
+- **RMSD:** fluctuation around the mean, **not** the protein structural RMSD.
+- **Tot-Drift:** estimated drift over the trajectory interval.
+
+For a target of 300 K, a mean near 300 K and no sustained trend are reassuring. **A good temperature alone does not establish that the protein complex is equilibrated or correctly docked.**
+
+The `.xvg` output is a text data file, **not an executable command**. Inspect it with:
+
+```bash
+head -n 20 temperature_nvt.xvg
+```
+
+Or plot numerical rows with a graphing program. Lines beginning with `#` or `@` contain metadata.
+
+## 7. Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| `nvt.tpr` is missing | Read the full `grompp` output; confirm the input files and working directory. |
+| `No such file or directory` | Run `pwd` and `ls -lh`; check paths to `.mdp`, `.gro`, `.top`, and included `.itp` files. |
+| Position-restraint reference error | Confirm `-r em.gro` was supplied and that atom counts/order match the topology. |
+| Large temperature drift | Review thermostat settings, initial geometry, constraints, and energy behavior. |
+| `LINCS WARNING` | Investigate immediately: it can indicate excessively large forces, bad contacts, or unstable integration. |
+| `temperature_nvt.xvg: command not found` | Open/plot the data file instead of attempting to run it. |
+
+
+## 10. Next chapter
+
+**Chapter 6: NPT Equilibration — Stabilizing Pressure and Density**
+
+We will continue the existing velocities and state using `nvt.cpt`, introduce pressure coupling, examine volume and density, and explain how to extend a simulation safely.
+
+## References
+
+1. Lemkul, J. A. (2024). *Introductory Tutorials for Simulating Protein Dynamics with GROMACS*. *Journal of Physical Chemistry B*, 128, 9418–9435. https://doi.org/10.1021/acs.jpcb.4c04901
+2. [GROMACS manual: Molecular dynamics parameters](https://manual.gromacs.org/current/user-guide/mdp-options.html)
+3. [GROMACS manual: `grompp`](https://manual.gromacs.org/current/onlinehelp/gmx-grompp.html)
+4. [GROMACS manual: `energy`](https://manual.gromacs.org/current/onlinehelp/gmx-energy.html)
